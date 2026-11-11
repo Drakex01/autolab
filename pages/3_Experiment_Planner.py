@@ -12,7 +12,7 @@ from core.database import save_experiment_plan, get_latest_plan, list_plans
 from core.schemas import ExperimentPlanSchema
 from services.planning_service import create_experiment_plan, build_evidence_context
 from services.retrieval_service import retrieve_relevant_chunks
-from services.llm_service import is_gemini_configured
+from services.llm_service import is_gemini_configured, GeminiQuotaExhaustedError
 
 st.set_page_config(page_title="AutoLab — Experiment Planner", page_icon="📝", layout="wide")
 init_session_state()
@@ -57,6 +57,8 @@ with col_act2:
                 plan_id = save_experiment_plan(current_ws["id"], plan_schema.model_dump())
                 st.success(f"Generated & saved new Experiment Plan #{plan_id}!")
                 st.rerun()
+            except GeminiQuotaExhaustedError as qe:
+                st.warning(f"⚠️ {qe}")
             except Exception as e:
                 st.error(f"Plan generation failed: {e}")
 

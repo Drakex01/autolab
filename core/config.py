@@ -20,6 +20,8 @@ load_dotenv(BASE_DIR / ".env")
 # LLM Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+# system_instruction and response_mime_type require v1beta in google-genai >= 3.0
+GEMINI_API_VERSION = os.getenv("GEMINI_API_VERSION", "v1beta").strip() or "v1beta"
 
 # Document RAG Configuration
 CHUNK_SIZE = int(os.getenv("AUTOLAB_CHUNK_SIZE", "800"))

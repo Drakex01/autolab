@@ -12,7 +12,7 @@ from core.database import (
     get_experiment_run, list_experiment_runs, update_run_interpretation,
     get_latest_plan
 )
-from services.analysis_service import analyze_and_interpret_run
+from services.analysis_service import analyze_and_interpret_run, RULE_BASED_LABEL
 from services.experiment_service import (
     plot_confusion_matrix, plot_regression_actual_vs_predicted,
     plot_clustering_2d_pca, plot_parameter_sweep, plot_feature_importance
@@ -102,10 +102,35 @@ with col_act2:
                 recs_json = json.dumps(analysis_out["recommendations"])
 
                 update_run_interpretation(selected_run["id"], interp_json, recs_json)
-                st.success("Analysis complete and persisted to database!")
+                if analysis_out.get("quota_exhausted"):
+                    st.session_state["last_quota_notice"] = {
+                        "run_id": selected_run["id"],
+                        "message": analysis_out.get("quota_message"),
+                        "retry_after": analysis_out.get("retry_after"),
+                        "source": analysis_out.get("source"),
+                    }
+                else:
+                    st.session_state.pop("last_quota_notice", None)
+                    st.success("Analysis complete and persisted to database!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Interpretation failed: {e}")
+
+quota_notice = st.session_state.get("last_quota_notice")
+if quota_notice and quota_notice.get("run_id") == selected_run["id"]:
+    retry_text = f" Suggested retry time: **{quota_notice['retry_after']}**." if quota_notice.get("retry_after") else ""
+    if quota_notice.get("source") == "gemini_partial":
+        st.warning(
+            f"⚠️ **Gemini daily quota has been exhausted** while generating follow-up recommendations.{retry_text} "
+            "Your experiment results and Gemini interpretation were preserved, and deterministic rule-based recommendations are shown below. "
+            "You can click **Re-Analyze with AI** once quota resets."
+        )
+    else:
+        st.warning(
+            f"⚠️ **Gemini daily quota has been exhausted (HTTP 429 RESOURCE_EXHAUSTED).**{retry_text} "
+            "All experiment results and workspace data have been preserved. A deterministic rule-based interpretation was generated below; "
+            "you can click **Re-Analyze with AI** once API quota becomes available again."
+        )
 
 # Render Interpretation if present
 if existing_interp:
@@ -114,10 +139,29 @@ if existing_interp:
     except Exception:
         interp_data = {"summary": existing_interp, "what_results_suggest": "", "hypothesis_status": "Inconclusive", "possible_reasons": [], "limitations": []}
 
+    is_rule_based = (
+        interp_data.get("source") == "rule_based"
+        or interp_data.get("source_label") == RULE_BASED_LABEL
+    )
+    if (
+        not (quota_notice and quota_notice.get("run_id") == selected_run["id"])
+        and interp_data.get("fallback_reason") == "quota_exhausted"
+    ):
+        retry_hint = f" Suggested retry time: **{interp_data['retry_after']}**." if interp_data.get("retry_after") else ""
+        st.warning(
+            f"⚠️ This run was interpreted during a **Gemini daily quota exhaustion** event.{retry_hint} "
+            "Click **Re-Analyze with AI** to generate a Gemini interpretation when quota is available."
+        )
+
     status_tag = interp_data.get("hypothesis_status", "Inconclusive")
     status_color = "🟢" if status_tag == "Supported" else "🔴" if status_tag == "Not Supported" else "🟡"
 
     with st.container(border=True):
+        if is_rule_based:
+            st.warning(f"📐 **{RULE_BASED_LABEL}**")
+        elif interp_data.get("source") == "gemini":
+            st.success("✨ **AI-Generated Interpretation (Gemini)**")
+
         st.markdown(f"### Hypothesis Assessment: {status_color} **{status_tag}**")
         st.markdown(f"**Research Question:** *{current_ws['research_question']}*")
         st.markdown(f"**Tested Hypothesis:** *{current_ws['hypothesis'] or 'No hypothesis specified'}*")

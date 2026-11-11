@@ -1,7 +1,9 @@
 import json
+import re
 import time
-from typing import Tuple, Optional, List, Dict, Any
-from core.config import GEMINI_API_KEY, GEMINI_MODEL
+from typing import Tuple, Optional, List, Dict, Any, Type, TypeVar
+from pydantic import BaseModel, ValidationError
+from core.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_API_VERSION
 from core.schemas import (
     ExperimentPlanSchema,
     InterpretationResult,
@@ -9,33 +11,154 @@ from core.schemas import (
     NextExperimentRecommendation
 )
 
+T = TypeVar("T", bound=BaseModel)
+
+
+class GeminiQuotaExhaustedError(RuntimeError):
+    """Raised when Gemini API rejects a request with HTTP 429 RESOURCE_EXHAUSTED."""
+
+    def __init__(self, message: str, retry_after: Optional[str] = None, is_daily_quota: bool = True):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.is_daily_quota = is_daily_quota
+
+
+def _normalize_retry_duration(raw_duration: str) -> str:
+    """Formats long decimal durations like '14.3712485s' into readable strings like '14.4s'."""
+    raw = raw_duration.strip()
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)", raw, flags=re.IGNORECASE)
+    if not match:
+        return raw
+    num_str, unit = match.group(1), match.group(2).lower()
+    if "." in num_str:
+        rounded = f"{float(num_str):.1f}".rstrip("0").rstrip(".")
+        return f"{rounded}{unit}"
+    return f"{num_str}{unit}"
+
+
+def _extract_retry_after(error: Exception) -> Optional[str]:
+    """Extracts suggested retry time from Gemini error details, headers, or message."""
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        detail_items = details.get("details") or details.get("error", {}).get("details") or []
+        if isinstance(detail_items, list):
+            for item in detail_items:
+                if isinstance(item, dict) and item.get("retryDelay"):
+                    return _normalize_retry_duration(str(item["retryDelay"]))
+
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        retry_hdr = headers.get("Retry-After") or headers.get("retry-after")
+        if retry_hdr:
+            hdr_str = str(retry_hdr).strip()
+            return f"{hdr_str}s" if hdr_str.isdigit() else hdr_str
+
+    combined_text = f"{getattr(error, 'message', '') or ''} {str(error)}"
+    msg_match = re.search(
+        r"(?:retry\s+(?:in|after)|retryDelay['\"]?\s*[:=]\s*['\"]?)\s*([0-9]+(?:\.[0-9]+)?\s*(?:ms|s|m|h))",
+        combined_text,
+        flags=re.IGNORECASE,
+    )
+    if msg_match:
+        return _normalize_retry_duration(msg_match.group(1))
+    return None
+
+
+def _is_daily_or_non_transient_quota(error: Exception) -> bool:
+    """Distinguishes non-transient daily/plan quota exhaustion from transient per-minute limits."""
+    combined = (
+        f"{getattr(error, 'status', '') or ''} "
+        f"{getattr(error, 'message', '') or ''} "
+        f"{getattr(error, 'details', '') or ''} "
+        f"{str(error)}"
+    ).lower()
+
+    daily_markers = ("perday", "requestsperday", "free_tier", "daily", "current quota", "limit: 0")
+    if any(marker in combined for marker in daily_markers):
+        return True
+
+    transient_markers = ("perminute", "requestsperminute", "tokensperminute")
+    if any(marker in combined for marker in transient_markers):
+        return False
+
+    # Default 429 RESOURCE_EXHAUSTED without explicit per-minute markers as non-transient
+    return True
+
+
+def _build_quota_error(error: Exception, is_daily_quota: bool) -> GeminiQuotaExhaustedError:
+    retry_after = _extract_retry_after(error)
+    if is_daily_quota:
+        msg = "Gemini API daily quota has been exhausted (HTTP 429 RESOURCE_EXHAUSTED)."
+    else:
+        msg = "Gemini API rate limit exceeded (HTTP 429 RESOURCE_EXHAUSTED)."
+    if retry_after:
+        msg += f" Please retry in {retry_after}."
+    else:
+        msg += " Please try again once your quota resets or use the rule-based fallback."
+    return GeminiQuotaExhaustedError(msg, retry_after=retry_after, is_daily_quota=is_daily_quota)
+
 def is_gemini_configured() -> Tuple[bool, str]:
     """Checks whether the Gemini API key is configured."""
     if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
         return False, "GEMINI_API_KEY is not set. Add your key to .env or environment variables."
-    return True, f"Configured with model: {GEMINI_MODEL}"
+    return True, f"Configured with model: {GEMINI_MODEL} (API {GEMINI_API_VERSION})"
 
 def get_gemini_client():
     from google import genai
-    return genai.Client(api_key=GEMINI_API_KEY)
+    from google.genai import types
+    return genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(api_version=GEMINI_API_VERSION),
+    )
 
-def call_gemini_with_retry(prompt: str, system_instruction: str = "", temperature: float = 0.2, max_retries: int = 2) -> str:
-    """Calls Gemini API with configurable retries and timeout."""
+def _parse_json_response(raw_json: str, schema_cls: Type[T]) -> T:
+    """Parses raw Gemini text output (stripping markdown fences if needed) and validates with Pydantic."""
+    cleaned = raw_json.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```json", "", 1).replace("```", "").strip()
+    try:
+        data = json.loads(cleaned)
+        return schema_cls.model_validate(data)
+    except (json.JSONDecodeError, ValidationError) as e:
+        raise ValueError(f"Gemini returned malformed JSON for {schema_cls.__name__}: {e}") from e
+
+def _maybe_as_quota_error(error: Exception) -> Optional[GeminiQuotaExhaustedError]:
+    """Converts HTTP 429 / RESOURCE_EXHAUSTED exceptions into GeminiQuotaExhaustedError."""
+    code = getattr(error, "code", None)
+    status_upper = str(getattr(error, "status", "") or "").upper()
+    err_upper = str(error).upper()
+    is_429 = (code == 429) or ("429" in err_upper and "RESOURCE_EXHAUSTED" in err_upper)
+    is_resource_exhausted = ("RESOURCE_EXHAUSTED" in status_upper) or ("RESOURCE_EXHAUSTED" in err_upper)
+    if is_429 or is_resource_exhausted:
+        is_daily = _is_daily_or_non_transient_quota(error)
+        return _build_quota_error(error, is_daily_quota=is_daily)
+    return None
+
+
+def call_gemini_with_retry(
+    prompt: str,
+    system_instruction: str = "",
+    temperature: float = 0.2,
+    max_retries: int = 2,
+    response_schema: Optional[Type[BaseModel]] = None,
+) -> str:
+    """Calls Gemini API with configurable retries and explicit error handling."""
     configured, msg = is_gemini_configured()
     if not configured:
         raise ValueError(msg)
 
-    from google import genai
-    from google.genai import types
+    from google.genai import types, errors
 
     client = get_gemini_client()
     config = types.GenerateContentConfig(
         temperature=temperature,
         system_instruction=system_instruction if system_instruction else None,
-        response_mime_type="application/json"
+        response_mime_type="application/json",
+        response_schema=response_schema,
     )
 
-    last_error = None
+    last_error: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
             response = client.models.generate_content(
@@ -47,12 +170,25 @@ def call_gemini_with_retry(prompt: str, system_instruction: str = "", temperatur
                 return response.text.strip()
             raise ValueError("Empty response received from Gemini.")
         except Exception as e:
-            last_error = e
-            if attempt < max_retries:
-                time.sleep(1.5 * (attempt + 1))
+            quota_err = _maybe_as_quota_error(e)
+            if quota_err is not None:
+                if quota_err.is_daily_quota:
+                    # Daily quota exhaustion is not transient — fail immediately without retrying
+                    raise quota_err from e
+                last_error = quota_err
+            elif isinstance(e, errors.ClientError):
+                # Non-429 4xx errors are non-retryable client/config errors
+                raise RuntimeError(
+                    f"Gemini API request rejected ({e.code} {e.status}): {e.message or str(e)}"
+                ) from e
             else:
-                break
+                last_error = e
 
+        if attempt < max_retries:
+            time.sleep(1.5 * (attempt + 1))
+
+    if isinstance(last_error, GeminiQuotaExhaustedError):
+        raise last_error
     raise RuntimeError(f"Gemini API call failed after {max_retries + 1} attempts: {str(last_error)}")
 
 def generate_plan_llm(
@@ -113,16 +249,13 @@ JSON SCHEMA REQUIRED:
   "is_grounded_in_sources": true/false
 }}
 """
-    raw_json = call_gemini_with_retry(prompt=prompt, system_instruction=system_instruction, temperature=0.2)
-    # Parse and validate with Pydantic
-    try:
-        data = json.loads(raw_json)
-        return ExperimentPlanSchema.model_validate(data)
-    except Exception as e:
-        # Fallback if wrapped in markdown block
-        cleaned = raw_json.replace("```json", "").replace("```", "").strip()
-        data = json.loads(cleaned)
-        return ExperimentPlanSchema.model_validate(data)
+    raw_json = call_gemini_with_retry(
+        prompt=prompt,
+        system_instruction=system_instruction,
+        temperature=0.2,
+        response_schema=ExperimentPlanSchema,
+    )
+    return _parse_json_response(raw_json, ExperimentPlanSchema)
 
 def interpret_results_llm(
     research_question: str,
@@ -165,14 +298,13 @@ JSON SCHEMA REQUIRED:
   "limitations": ["List of 2-3 caveats (sample size, data distribution, lack of external validation, etc.)"]
 }}
 """
-    raw_json = call_gemini_with_retry(prompt=prompt, system_instruction=system_instruction, temperature=0.2)
-    try:
-        data = json.loads(raw_json)
-        return InterpretationResult.model_validate(data)
-    except Exception:
-        cleaned = raw_json.replace("```json", "").replace("```", "").strip()
-        data = json.loads(cleaned)
-        return InterpretationResult.model_validate(data)
+    raw_json = call_gemini_with_retry(
+        prompt=prompt,
+        system_instruction=system_instruction,
+        temperature=0.2,
+        response_schema=InterpretationResult,
+    )
+    return _parse_json_response(raw_json, InterpretationResult)
 
 def recommend_next_experiments_llm(
     research_question: str,
@@ -224,12 +356,5 @@ JSON SCHEMA REQUIRED:
 }}
 """
     raw_json = call_gemini_with_retry(prompt=prompt, system_instruction=system_instruction, temperature=0.2)
-    try:
-        data = json.loads(raw_json)
-        recs = FollowUpRecommendations.model_validate(data)
-        return recs.recommendations
-    except Exception:
-        cleaned = raw_json.replace("```json", "").replace("```", "").strip()
-        data = json.loads(cleaned)
-        recs = FollowUpRecommendations.model_validate(data)
-        return recs.recommendations
+    recs = _parse_json_response(raw_json, FollowUpRecommendations)
+    return recs.recommendations
