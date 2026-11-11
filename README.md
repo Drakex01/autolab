@@ -23,8 +23,8 @@ AutoLab is a desktop AI research laboratory built for students and researchers. 
 3. **📝 Experiment Planner:**
    - Generates 12-section structured empirical protocols (Objective, Testable Hypothesis, Independent/Dependent/Controlled Variables, Methodology, Baseline, Evaluation Metrics, Expected Outputs, Risks & Limitations, Next Steps, Verified Citations, Assumptions).
    - Grounded in retrieved literature context when documents are present.
-   - Powered by Google Gemini (`google-genai` SDK) with JSON validation via Pydantic.
-   - Deterministic template fallback if Gemini API key is omitted.
+   - Powered offline by local **Ollama** (`qwen2.5:7b-instruct` default, or switchable `qwen2.5:3b-instruct`) with strict JSON Schema output validation via Pydantic (and optional Google Gemini cloud support).
+   - Explicit offline template button and deterministic fallback if local Ollama is stopped.
    - In-place plan customization and revision history.
 
 4. **⚡ Safe Predefined Experiment Runner:**
@@ -63,7 +63,8 @@ AutoLab is a desktop AI research laboratory built for students and researchers. 
 
 - **Language:** Python 3.11+ (Compatible with Python 3.11 – 3.14)
 - **Application Framework:** Streamlit
-- **LLM SDK:** Google Gemini via official `google-genai`
+- **Local LLM Runtime (Default):** Ollama (`http://localhost:11434`) running `qwen2.5:7b-instruct` or `qwen2.5:3b-instruct` with JSON Schema enforcement (`requests`)
+- **Optional Cloud LLM:** Google Gemini via `google-genai` (disabled unless `LLM_PROVIDER=gemini`)
 - **Document Extraction:** PyMuPDF (`pymupdf`)
 - **Embeddings:** `sentence-transformers` (`all-MiniLM-L6-v2`)
 - **Vector Retrieval:** `faiss-cpu` (with cosine fallback)
@@ -77,12 +78,29 @@ AutoLab is a desktop AI research laboratory built for students and researchers. 
 
 ## 📦 Installation & Setup
 
-### 1. Clone or Open Project
+### 1. Install Ollama & Pull Local Qwen Models (Offline Default)
+1. Install Ollama for Windows/macOS/Linux from <https://ollama.com/download> (or `winget install Ollama.Ollama` on Windows).
+2. Download the default 7B model (and optional faster 3B model for 4 GB VRAM laptops):
+```bash
+ollama pull qwen2.5:7b-instruct
+ollama pull qwen2.5:3b-instruct
+```
+3. Ensure the local Ollama server is running:
+```bash
+ollama serve
+```
+Verify loaded models at any time with:
+```bash
+ollama list
+ollama ps
+```
+
+### 2. Clone or Open Project
 ```bash
 cd autolab
 ```
 
-### 2. Configure Python Virtual Environment (Recommended)
+### 3. Configure Python Virtual Environment (Recommended)
 ```bash
 python -m venv .venv
 # Windows:
@@ -91,22 +109,29 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Install Dependencies
+### 4. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configure Gemini API Key
-Copy the example environment file:
+### 5. Environment Configuration (`.env`)
+No API key is required for default offline mode! Optionally copy `.env.example` to `.env` to customize local settings:
 ```bash
 cp .env.example .env
 ```
-Open `.env` in any text editor and insert your Google Gemini API key:
+Default local Ollama settings in `.env`:
 ```env
-GEMINI_API_KEY=AIzaSy...your_actual_key_here
-GEMINI_MODEL=gemini-2.5-flash
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:7b-instruct
+OLLAMA_NUM_CTX=4096
+OLLAMA_TEMPERATURE=0.2
+OLLAMA_TIMEOUT_SECONDS=360
+OLLAMA_KEEP_ALIVE=5m
 ```
-> **Note:** If `GEMINI_API_KEY` is not provided, AutoLab runs gracefully in deterministic mode: document ingestion, vector retrieval, dataset inspection, predefined ML runs, Plotly charts, and experiment history remain 100% functional.
+> **Optional Cloud Gemini:** Only used if you explicitly set `LLM_PROVIDER=gemini` and provide `GEMINI_API_KEY`. When `LLM_PROVIDER=ollama` (default), AutoLab makes zero cloud AI requests and never silently switches to Gemini.
+
+> **16 GB RAM / RTX 3050 4 GB VRAM Tip:** `qwen2.5:7b-instruct` (~4.7 GB Q4_K_M) splits across GPU VRAM and system RAM. If 7B generation feels slow or tight alongside large datasets, switch cleanly to `qwen2.5:3b-instruct` directly in the **Dashboard → Local LLM Settings & Diagnostics** panel (which automatically unloads the previous model).
 
 ---
 
@@ -196,6 +221,9 @@ python -m pytest tests/ -v
 ```
 
 Tests included:
+- `test_ollama_provider.py`: Ollama connectivity, JSON schema validation, offline RAG citation checks, comparative/interpretation routing, and no-silent-Gemini-fallback enforcement.
+- `test_comparative_analysis.py`: Cross-run comparative analysis, hypothesis assessment, and duplicate recommendation prevention.
+- `test_quota_handling.py`: Optional Gemini error detection and deterministic rule-based fallback.
 - `test_database.py`: Workspaces, documents, plans, and runs CRUD lifecycle.
 - `test_chunking.py`: Chunk boundary splitting and overlap preservation.
 - `test_retrieval.py`: Dense embedding generation, FAISS indexing, and cosine retrieval.

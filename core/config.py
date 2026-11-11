@@ -17,7 +17,19 @@ for directory in (DATA_DIR, UPLOADS_DIR, VECTOR_STORE_DIR, SAMPLE_DOCS_DIR):
 # Load environment variables
 load_dotenv(BASE_DIR / ".env")
 
-# LLM Configuration
+# LLM Provider Configuration (Ollama is the default local provider)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower() or "ollama"
+
+# Local Ollama Settings (conservative defaults for 16 GB RAM / RTX 3050 4 GB VRAM)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip().rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip()
+OLLAMA_SUPPORTED_MODELS = ["qwen2.5:7b-instruct", "qwen2.5:3b-instruct"]
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "360"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "5m").strip()
+
+# Optional Gemini API Configuration (only used when provider is explicitly set to 'gemini')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 # system_instruction and response_mime_type require v1beta in google-genai >= 3.0

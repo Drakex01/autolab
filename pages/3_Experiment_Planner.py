@@ -7,12 +7,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.state import init_session_state, get_current_workspace
+from core.state import init_session_state, get_current_workspace, get_runtime_llm_settings
 from core.database import save_experiment_plan, get_latest_plan, list_plans
 from core.schemas import ExperimentPlanSchema
 from services.planning_service import create_experiment_plan, build_evidence_context
 from services.retrieval_service import retrieve_relevant_chunks
-from services.llm_service import is_gemini_configured, GeminiQuotaExhaustedError
+from services.llm_service import (
+    GeminiQuotaExhaustedError,
+    OllamaModelNotFoundError,
+    OllamaUnavailableError,
+    is_llm_configured,
+)
 
 st.set_page_config(page_title="AutoLab — Experiment Planner", page_icon="📝", layout="wide")
 init_session_state()
@@ -28,11 +33,19 @@ if not current_ws:
     st.stop()
 
 # LLM Status Banner
-is_configured, status_msg = is_gemini_configured()
-if not is_configured:
-    st.warning(f"⚠️ {status_msg} (A deterministic methodological template will be generated if you proceed without an API key).")
+llm_cfg = get_runtime_llm_settings()
+active_provider = llm_cfg["provider"]
+is_configured, status_msg = is_llm_configured()
+if active_provider == "ollama":
+    if is_configured:
+        st.success(f"🤖 **Local Ollama Engine active:** `{status_msg}`")
+    else:
+        st.error(f"❌ **Local Ollama Unavailable:** {status_msg}")
 else:
-    st.success(f"✨ Gemini LLM Engine active ({status_msg})")
+    if not is_configured:
+        st.warning(f"⚠️ {status_msg} (A deterministic methodological template will be generated if you proceed without an API key).")
+    else:
+        st.success(f"✨ **Gemini LLM Engine active (Optional):** {status_msg}")
 
 # Top Context Expander
 with st.expander("🔍 Verified Literature Evidence Context for this Plan", expanded=False):
@@ -44,7 +57,7 @@ with st.expander("🔍 Verified Literature Evidence Context for this Plan", expa
     else:
         st.info("No documents uploaded yet in Knowledge Library. The plan will be constructed from general methodology.")
 
-col_act1, col_act2 = st.columns([3, 1])
+col_act1, col_act2, col_act3 = st.columns([2, 1, 1])
 with col_act1:
     st.markdown(f"**Target:** `{current_ws['title']}` | **Area:** `{current_ws['research_area']}`")
 with col_act2:
@@ -53,14 +66,22 @@ with col_act2:
             try:
                 plan_schema = create_experiment_plan(current_ws)
                 st.session_state.latest_generated_plan = plan_schema.model_dump()
-                # Save to database
                 plan_id = save_experiment_plan(current_ws["id"], plan_schema.model_dump())
                 st.success(f"Generated & saved new Experiment Plan #{plan_id}!")
                 st.rerun()
+            except (OllamaUnavailableError, OllamaModelNotFoundError) as oe:
+                st.error(f"❌ {oe}")
             except GeminiQuotaExhaustedError as qe:
                 st.warning(f"⚠️ {qe}")
             except Exception as e:
                 st.error(f"Plan generation failed: {e}")
+with col_act3:
+    if st.button("📋 Generate Offline Template", help="Builds a deterministic template without calling any LLM", use_container_width=True):
+        plan_schema = create_experiment_plan(current_ws, use_template_only=True)
+        st.session_state.latest_generated_plan = plan_schema.model_dump()
+        plan_id = save_experiment_plan(current_ws["id"], plan_schema.model_dump())
+        st.success(f"Generated deterministic template Plan #{plan_id}!")
+        st.rerun()
 
 # Check current plan
 active_plan = st.session_state.get("latest_generated_plan")

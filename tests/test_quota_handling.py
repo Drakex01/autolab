@@ -113,7 +113,7 @@ def test_analysis_falls_back_to_labeled_rule_based_on_quota_exhausted():
         patch.object(analysis_service, "is_gemini_configured", return_value=(True, "Configured")),
         patch.object(analysis_service, "interpret_results_llm", side_effect=quota_err),
     ):
-        out = analysis_service.analyze_and_interpret_run(workspace, run_record)
+        out = analysis_service.analyze_and_interpret_run(workspace, run_record, provider="gemini")
 
     interp = out["interpretation"]
     assert out["quota_exhausted"] is True
@@ -200,7 +200,7 @@ def test_preserves_run_data_and_recovers_when_quota_returns():
             patch.object(analysis_service, "is_gemini_configured", return_value=(True, "Configured")),
             patch.object(analysis_service, "interpret_results_llm", side_effect=quota_err),
         ):
-            fallback_out = analysis_service.analyze_and_interpret_run(ws, run_rec)
+            fallback_out = analysis_service.analyze_and_interpret_run(ws, run_rec, provider="gemini")
 
         database.update_run_interpretation(
             run_id,
@@ -237,7 +237,7 @@ def test_preserves_run_data_and_recovers_when_quota_returns():
             patch.object(analysis_service, "retrieve_relevant_chunks", return_value=[]),
             patch.object(analysis_service, "recommend_next_experiments_llm", return_value=mock_recs),
         ):
-            recovered_out = analysis_service.analyze_and_interpret_run(ws, saved_after_fallback)
+            recovered_out = analysis_service.analyze_and_interpret_run(ws, saved_after_fallback, provider="gemini")
 
         assert recovered_out["quota_exhausted"] is False
         assert recovered_out["source"] == "gemini"
@@ -275,7 +275,7 @@ def test_partial_quota_preserves_gemini_interpretation_with_rule_based_recommend
         patch.object(analysis_service, "retrieve_relevant_chunks", return_value=[]),
         patch.object(analysis_service, "recommend_next_experiments_llm", side_effect=quota_err),
     ):
-        out = analysis_service.analyze_and_interpret_run(workspace, run_record)
+        out = analysis_service.analyze_and_interpret_run(workspace, run_record, provider="gemini")
 
     assert out["quota_exhausted"] is True
     assert out["retry_after"] == "42s"

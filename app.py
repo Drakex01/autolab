@@ -7,9 +7,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.config import GEMINI_API_KEY, GEMINI_MODEL
-from core.state import init_session_state, get_current_workspace, set_current_workspace
+from core.config import OLLAMA_SUPPORTED_MODELS
+from core.state import (
+    get_current_workspace,
+    get_runtime_llm_settings,
+    init_session_state,
+    set_current_workspace,
+)
 from core.database import list_workspaces, list_documents, get_latest_plan, list_experiment_runs
+from services.llm_service import (
+    check_ollama_status,
+    is_gemini_configured,
+    test_ollama_prompt,
+    unload_ollama_model,
+)
 
 st.set_page_config(
     page_title="AutoLab — AI Scientific Research Platform",
@@ -59,14 +70,35 @@ with st.sidebar:
     # System Status
     st.markdown("### ⚙️ System Status")
     st.markdown("• **Database:** `SQLite (Online)`")
-    if GEMINI_API_KEY:
-        st.markdown(f"• **LLM Engine:** `Connected ({GEMINI_MODEL})` ✅")
-    else:
-        st.markdown("• **LLM Engine:** `API Key Missing` ⚠️")
-        st.caption("Add `GEMINI_API_KEY` to `.env` to enable AI planner & insights.")
 
-    st.markdown("• **Embeddings:** `all-MiniLM-L6-v2`")
-    st.markdown("• **Vector Engine:** `FAISS CPU`")
+    llm_cfg = get_runtime_llm_settings()
+    active_provider = llm_cfg["provider"]
+    active_model = llm_cfg["ollama_model"]
+
+    if active_provider == "ollama":
+        ollama_status = check_ollama_status(model=active_model)
+        st.markdown("• **LLM Provider:** `Ollama (Local)`")
+        st.markdown(f"• **Model:** `{active_model}`")
+        if ollama_status["connected"]:
+            st.markdown("• **Connection:** `Connected` ✅")
+            if ollama_status["model_available"]:
+                st.markdown("• **Model Status:** `Available` ✅")
+            else:
+                st.markdown("• **Model Status:** `Not Downloaded` ⚠️")
+                st.caption(f"Run `ollama pull {active_model}` or switch to `qwen2.5:3b-instruct`.")
+        else:
+            st.markdown("• **Connection:** `Stopped / Unreachable` ❌")
+            st.error(ollama_status["error"] or "Ollama is stopped. Start Ollama to run local AI.")
+    else:
+        gem_ok, gem_msg = is_gemini_configured()
+        st.markdown("• **LLM Provider:** `Gemini (Optional)`")
+        if gem_ok:
+            st.markdown(f"• **Connection:** `{gem_msg}` ✅")
+        else:
+            st.markdown("• **Connection:** `Not Configured` ⚠️")
+
+    st.markdown("• **Embeddings:** `all-MiniLM-L6-v2` (Local)")
+    st.markdown("• **Vector Engine:** `FAISS CPU` (Local)")
 
 # ----------------- MAIN OVERVIEW ----------------- #
 st.title("🔬 AutoLab: AI Scientific Research Assistant")
@@ -129,6 +161,111 @@ else:
     with c1:
         if st.button("✨ Go to Research Workspace", type="primary", use_container_width=True):
             st.switch_page("pages/1_Research_Workspace.py")
+
+st.markdown("---")
+st.subheader("🤖 Local LLM Settings & Diagnostics")
+llm_cfg = get_runtime_llm_settings()
+
+with st.container(border=True):
+    s_col1, s_col2, s_col3 = st.columns(3)
+
+    with s_col1:
+        provider_choice = st.selectbox(
+            "LLM Provider",
+            options=["ollama", "gemini"],
+            index=0 if llm_cfg["provider"] == "ollama" else 1,
+            format_func=lambda x: "Ollama (Local Offline Default)" if x == "ollama" else "Gemini (Optional Cloud)",
+            help="AutoLab runs offline with local Ollama by default. Gemini is optional.",
+        )
+        if provider_choice != st.session_state.llm_provider:
+            st.session_state.llm_provider = provider_choice
+            st.rerun()
+
+    with s_col2:
+        if provider_choice == "ollama":
+            ollama_info = check_ollama_status(model=llm_cfg["ollama_model"])
+            model_choices = list(OLLAMA_SUPPORTED_MODELS)
+            for m in ollama_info.get("installed_models", []):
+                if m not in model_choices:
+                    model_choices.append(m)
+            current_m_idx = model_choices.index(llm_cfg["ollama_model"]) if llm_cfg["ollama_model"] in model_choices else 0
+
+            selected_model = st.selectbox(
+                "Local Ollama Model",
+                options=model_choices,
+                index=current_m_idx,
+                help="Use qwen2.5:7b-instruct by default, or switch to qwen2.5:3b-instruct for lower RAM/VRAM usage.",
+            )
+            if selected_model != st.session_state.ollama_model:
+                old_model = st.session_state.ollama_model
+                unload_ollama_model(old_model)
+                st.session_state.ollama_model = selected_model
+                st.toast(f"Switched local model to {selected_model} (released {old_model}).")
+                st.rerun()
+        else:
+            gem_ok, gem_msg = is_gemini_configured()
+            st.text_input("Optional Cloud Provider", value="Gemini (Configured in .env)" if gem_ok else "Gemini (Key not set in .env)", disabled=True)
+
+    with s_col3:
+        ctx_options = [2048, 4096, 8192]
+        cur_ctx = llm_cfg["ollama_num_ctx"] if llm_cfg["ollama_num_ctx"] in ctx_options else 4096
+        selected_ctx = st.selectbox(
+            "Context Window (num_ctx)",
+            options=ctx_options,
+            index=ctx_options.index(cur_ctx),
+            disabled=(provider_choice != "ollama"),
+            help="4096 tokens is recommended for 16 GB RAM / RTX 3050 laptops.",
+        )
+        if selected_ctx != st.session_state.ollama_num_ctx:
+            st.session_state.ollama_num_ctx = selected_ctx
+            st.rerun()
+
+    if provider_choice == "ollama":
+        status_now = check_ollama_status(model=st.session_state.ollama_model)
+        if not status_now["connected"]:
+            st.error(f"❌ **Ollama Stopped:** {status_now['error']}")
+        elif not status_now["model_available"]:
+            st.warning(f"⚠️ **Model Missing:** {status_now['error']}")
+        else:
+            st.success(f"✅ **Ollama Connected** (`{status_now['base_url']}`) — Active model `{st.session_state.ollama_model}` is ready.")
+
+        b_col1, b_col2, b_col3 = st.columns([1, 1, 1])
+        with b_col1:
+            if st.button("🔍 Check Ollama Connectivity", use_container_width=True):
+                st.session_state["ollama_diag_result"] = check_ollama_status(model=st.session_state.ollama_model)
+        with b_col2:
+            if st.button("🧪 Test Sample Prompt", use_container_width=True):
+                with st.spinner(f"Testing {st.session_state.ollama_model}..."):
+                    try:
+                        st.session_state["ollama_test_output"] = test_ollama_prompt(model=st.session_state.ollama_model)
+                    except Exception as ex:
+                        st.session_state["ollama_test_output"] = {"ok": False, "error": str(ex)}
+        with b_col3:
+            if st.button("🧹 Release Loaded Model", use_container_width=True, help="Unloads active model from GPU/CPU memory"):
+                unload_ollama_model(st.session_state.ollama_model)
+                st.toast(f"Released {st.session_state.ollama_model} from memory.")
+                st.session_state["ollama_diag_result"] = check_ollama_status(model=st.session_state.ollama_model)
+
+        diag = st.session_state.get("ollama_diag_result")
+        if diag:
+            if diag["connected"]:
+                st.caption(f"Installed local models: `{diag['installed_models'] or ['None']}`")
+                if diag["running_models"]:
+                    for rm in diag["running_models"]:
+                        st.info(
+                            f"Active Memory Allocation (`{rm['name']}`): Total `{rm['size_mb']} MB` | "
+                            f"GPU VRAM `{rm['vram_mb']} MB` | CPU RAM `{rm['cpu_ram_mb']} MB`"
+                        )
+            else:
+                st.error(diag["error"])
+
+        test_out = st.session_state.get("ollama_test_output")
+        if test_out:
+            if test_out.get("ok"):
+                dur = f" ({test_out['eval_duration_s']}s)" if test_out.get("eval_duration_s") else ""
+                st.success(f"Sample Prompt Response from `{test_out['model']}`{dur}: {test_out['response']}")
+            else:
+                st.error(f"Sample Prompt Failed: {test_out.get('error')}")
 
 st.markdown("---")
 with st.expander("ℹ️ How AutoLab Enforces Scientific Integrity"):
