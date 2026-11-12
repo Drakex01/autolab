@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from core.state import init_session_state, get_current_workspace
 from core.database import save_experiment_run, get_latest_plan
 from services.experiment_service import (
+    CLASSIFICATION_MODELS, REGRESSION_MODELS,
     get_builtin_datasets, load_dataset,
     run_classification_experiment, run_regression_experiment,
     run_clustering_experiment, run_parameter_sweep,
@@ -110,9 +111,9 @@ if df is not None:
 
     with c_cfg1:
         if exp_type == "Classification":
-            model_choice = st.selectbox("Model", ["Random Forest", "Logistic Regression"])
+            model_choice = st.selectbox("Model", CLASSIFICATION_MODELS)
         elif exp_type == "Regression":
-            model_choice = st.selectbox("Model", ["Random Forest Regressor", "Linear Regression"])
+            model_choice = st.selectbox("Model", REGRESSION_MODELS)
         elif exp_type == "Clustering":
             model_choice = "K-Means"
             st.text_input("Algorithm", value="K-Means", disabled=True)
@@ -201,11 +202,16 @@ if df is not None:
         st.markdown("---")
         st.subheader("📊 Execution Results & Visualizations")
 
-        # Metric Badges
-        metric_cols = st.columns(len(res["metrics"]))
-        for col, (m_key, m_val) in zip(metric_cols, res["metrics"].items()):
-            with col:
-                st.metric(m_key.replace('_', ' ').title(), f"{m_val}")
+        # Metric Badges (render scalar metrics cleanly in rows of 4)
+        scalar_metrics = {
+            k: v for k, v in (res.get("metrics") or {}).items()
+            if isinstance(v, (int, float, str)) and not isinstance(v, bool)
+        }
+        if scalar_metrics:
+            metric_cols = st.columns(min(4, len(scalar_metrics)))
+            for idx, (m_key, m_val) in enumerate(scalar_metrics.items()):
+                with metric_cols[idx % len(metric_cols)]:
+                    st.metric(m_key.replace('_', ' ').title(), f"{m_val}")
 
         # Render relevant charts
         if res["experiment_type"] == "classification":

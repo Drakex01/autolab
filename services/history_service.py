@@ -15,9 +15,10 @@ def format_runs_for_comparison(runs: List[Dict[str, Any]]) -> pd.DataFrame:
             "Model": r["config"].get("model_type", r["config"].get("model_name", "N/A")),
             "Timestamp": r["created_at"][:19],
         }
-        # Add metrics
-        for m_name, m_val in r["metrics"].items():
-            row[f"Metric: {m_name}"] = m_val
+        # Add scalar metrics cleanly (skip nested confusion matrices / per-class dicts)
+        for m_name, m_val in (r.get("metrics") or {}).items():
+            if isinstance(m_val, (int, float, str)) and not isinstance(m_val, bool):
+                row[f"Metric: {m_name}"] = m_val
 
         rows.append(row)
 

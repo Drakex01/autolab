@@ -25,6 +25,9 @@ CLASSIFICATION_METRIC_ORDER = [
     "recall_weighted",
     "f1_weighted",
     "f1_macro",
+    "balanced_accuracy",
+    "roc_auc",
+    "positive_class_recall",
     "precision_macro",
     "recall_macro",
 ]
@@ -35,8 +38,26 @@ METRIC_DISPLAY_NAMES = {
     "recall_weighted": "Recall (Weighted)",
     "f1_weighted": "F1-Score (Weighted)",
     "f1_macro": "F1-Score (Macro)",
+    "balanced_accuracy": "Balanced Accuracy",
+    "roc_auc": "ROC-AUC",
+    "positive_class_recall": "Positive Class Recall",
+    "positive_class_precision": "Positive Class Precision",
+    "positive_class_f1": "Positive Class F1",
+    "cv_score_mean": "CV Score (Mean)",
     "precision_macro": "Precision (Macro)",
     "recall_macro": "Recall (Macro)",
+}
+
+# Diagnostic/count/time metrics that are not 0..1 classification accuracy proportions
+_NON_PROPORTION_METRIC_KEYS = {
+    "train_accuracy",
+    "cv_score_mean",
+    "cv_score_std",
+    "cv_roc_auc_mean",
+    "generalization_gap",
+    "training_time_seconds",
+    "false_negatives",
+    "false_positives",
 }
 
 
@@ -353,10 +374,20 @@ def build_comparative_analysis(
 
     shared_numeric = [
         k for k in CLASSIFICATION_METRIC_ORDER
-        if isinstance(rf_metrics.get(k), (int, float)) and isinstance(lr_metrics.get(k), (int, float))
+        if isinstance(rf_metrics.get(k), (int, float))
+        and not isinstance(rf_metrics.get(k), bool)
+        and isinstance(lr_metrics.get(k), (int, float))
+        and not isinstance(lr_metrics.get(k), bool)
     ]
     for k in sorted(set(rf_metrics.keys()) & set(lr_metrics.keys())):
-        if k not in shared_numeric and isinstance(rf_metrics.get(k), (int, float)) and isinstance(lr_metrics.get(k), (int, float)):
+        if (
+            k not in shared_numeric
+            and k not in _NON_PROPORTION_METRIC_KEYS
+            and isinstance(rf_metrics.get(k), (int, float))
+            and not isinstance(rf_metrics.get(k), bool)
+            and isinstance(lr_metrics.get(k), (int, float))
+            and not isinstance(lr_metrics.get(k), bool)
+        ):
             shared_numeric.append(k)
 
     if selected_metrics:
